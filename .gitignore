@@ -1,0 +1,35 @@
+# --- BACKEND (Python/FastAPI) ---
+# Virtual environments (Never push these!)
+backend/venv/
+backend/env/
+backend/.venv/
+
+# Python cache
+backend/__pycache__/
+backend/*.pyc
+backend/*.pyo
+
+# SECRETS & DATABASE (CRITICAL: DO NOT PUSH THESE)
+backend/credentials.json
+backend/token.json
+backend/jobs.db
+backend/oauth_state.json
+backend/.env
+
+# --- FRONTEND (Node/React) ---
+# Dependencies (Never push these!)
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+frontend/build/
+
+# Environment variables
+frontend/.env.local
+frontend/.env
+
+# --- EDITOR & OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
