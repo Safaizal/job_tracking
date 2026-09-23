@@ -99,6 +99,17 @@ def auth_status():
     connected = os.path.exists("token.json")
     return {"connected": connected}
 
+# 6. LOGOUT: Delete the saved token so the user is actually logged out
+@app.post("/auth/logout")
+def logout():
+    # Delete the stored Google OAuth token
+    if os.path.exists("token.json"):
+        os.remove("token.json")
+    # Clean up any leftover OAuth handshake state
+    if os.path.exists(auth.STATE_FILE):
+        os.remove(auth.STATE_FILE)
+    return {"connected": False, "message": "Logged out successfully"}
+
 @app.post("/api/sync-gmail")
 def sync_gmail(db: Session = Depends(get_db)):
     new_jobs = gmail_service.fetch_and_parse_jobs()

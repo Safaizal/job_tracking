@@ -85,8 +85,11 @@ function App() {
 
   const handleLogout = () => {
     fetch('http://localhost:8000/auth/logout', { method: 'POST' })
-      .then(() => { setIsGmailConnected(false); window.location.href = '/' })
-      .catch(() => {})
+      .then(res => {
+        setIsGmailConnected(false)
+        if (res.ok) window.location.href = '/'
+      })
+      .catch(() => setIsGmailConnected(false))
   }
 
   const filteredJobs = useMemo(() => {
