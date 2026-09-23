@@ -12,7 +12,7 @@ import {
   Trash2, Search, Loader2, Briefcase, Sparkles, TrendingUp,
   Building2, Mail, Zap, Filter, Calendar, ArrowUpRight,
   CircleDot, CheckCircle2, XCircle, Clock3, Layers,
-  LogOut, Menu, X
+  LogOut, Menu, X, Hash, ExternalLink
 } from "lucide-react"
 
 function App() {
@@ -26,9 +26,19 @@ function App() {
   const [role, setRole] = useState('')
   const [mobileMenu, setMobileMenu] = useState(false)
 
+  // Selected job for the detail popup
+  const [selectedJob, setSelectedJob] = useState(null)
+
   // Always dark
   useEffect(() => {
     document.documentElement.classList.add('dark')
+  }, [])
+
+  // Close the job detail popup on Escape
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') setSelectedJob(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [])
 
   const fetchJobs = () => {
@@ -61,13 +71,23 @@ function App() {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...jobData, status: newStatus }),
-    }).then(() => fetchJobs())
+    }).then(() => {
+      // Reflect the change in the open detail popup too
+      setSelectedJob(prev => prev && prev.id === jobId ? { ...prev, status: newStatus } : prev)
+      fetchJobs()
+    })
   }
 
   const handleDelete = (jobId) => {
     if (!window.confirm("Delete this application?")) return
-    fetch(`http://localhost:8000/api/jobs/${jobId}`, { method: 'DELETE' }).then(() => fetchJobs())
+    fetch(`http://localhost:8000/api/jobs/${jobId}`, { method: 'DELETE' }).then(() => {
+      setSelectedJob(prev => prev && prev.id === jobId ? null : prev)
+      fetchJobs()
+    })
   }
+
+  const handleJobClick = (job) => setSelectedJob(job)
+  const closeJobDetail = () => setSelectedJob(null)
 
   const handleGmailLogin = () => {
     fetch('http://localhost:8000/auth/login')
@@ -429,7 +449,8 @@ function App() {
                               animate={{ opacity: 1, y: 0 }}
                               exit={{ opacity: 0, y: -8 }}
                               transition={{ delay: idx * 0.03, duration: 0.35, ease: [0.22, 1, 0.36, 1] }}
-                              className="group border-white/[0.04] hover:bg-white/[0.04] transition-colors"
+                              onClick={() => handleJobClick(job)}
+                              className="group border-white/[0.04] hover:bg-white/[0.04] transition-colors cursor-pointer"
                             >
                               <TableCell className="font-bold max-w-[180px]">
                                 <div className="flex items-center gap-2.5">
@@ -437,12 +458,13 @@ function App() {
                                     {job.company.slice(0,2).toUpperCase()}
                                   </div>
                                   <span className="truncate text-white">{job.company}</span>
+                                  <ExternalLink className="w-3.5 h-3.5 text-neutral-600 opacity-0 group-hover:opacity-100 transition-opacity shrink-0" />
                                 </div>
                               </TableCell>
                               <TableCell className="max-w-[320px] truncate text-sm text-neutral-400 group-hover:text-white transition-colors">
                                 {job.role}
                               </TableCell>
-                              <TableCell>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
                                 <Select value={job.status} onValueChange={(v) => handleStatusChange(job.id, v, job)}>
                                   <SelectTrigger className="w-[148px] h-8 rounded-full glass bg-white/[0.04] border-white/[0.06] text-xs font-semibold text-white">
                                     <span className="flex items-center gap-2">
@@ -463,7 +485,7 @@ function App() {
                                   <Calendar className="w-3 h-3" /> {job.date}
                                 </span>
                               </TableCell>
-                              <TableCell>
+                              <TableCell onClick={(e) => e.stopPropagation()}>
                                 <Button variant="ghost" size="icon"
                                   className="h-8 w-8 rounded-full text-neutral-600 hover:text-red-400 hover:bg-red-500/10 opacity-50 group-hover:opacity-100 transition-all"
                                   onClick={() => handleDelete(job.id)}>
@@ -504,7 +526,8 @@ function App() {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.97 }}
                         transition={{ delay: idx * 0.04, duration: 0.35 }}
-                        className="glass-strong rounded-2xl p-4 space-y-3"
+                        onClick={() => handleJobClick(job)}
+                        className="glass-strong rounded-2xl p-4 space-y-3 cursor-pointer hover:bg-white/[0.08] transition-colors"
                       >
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
@@ -516,11 +539,11 @@ function App() {
                               <div className="text-xs text-neutral-400 truncate">{job.role}</div>
                             </div>
                           </div>
-                          <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-neutral-600 hover:text-red-400 hover:bg-red-500/10 shrink-0 -mr-1" onClick={() => handleDelete(job.id)}>
+                          <Button variant="ghost" size="icon" className="h-8 w-8 rounded-full text-neutral-600 hover:text-red-400 hover:bg-red-500/10 shrink-0 -mr-1" onClick={(e) => { e.stopPropagation(); handleDelete(job.id) }}>
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
-                        <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center justify-between gap-2" onClick={(e) => e.stopPropagation()}>
                           <Select value={job.status} onValueChange={(v) => handleStatusChange(job.id, v, job)}>
                             <SelectTrigger className="flex-1 h-9 rounded-full glass bg-white/[0.04] border-white/[0.06] text-xs font-semibold text-white">
                               <span className="flex items-center gap-2">
@@ -552,6 +575,138 @@ function App() {
           Crafted with glass, motion & obsession for detail • GSAP Style • v2.2
         </p>
       </main>
+
+      {/* ── Job Detail Popup ── */}
+      <AnimatePresence>
+        {selectedJob && (() => {
+          const meta = getStatusMeta(selectedJob.status)
+          return (
+            <motion.div
+              className="fixed inset-0 z-50 flex items-center justify-center p-4"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={closeJobDetail}
+            >
+              {/* Backdrop */}
+              <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+
+              {/* Dialog card */}
+              <motion.div
+                role="dialog"
+                aria-modal="true"
+                aria-label={`${selectedJob.company} — ${selectedJob.role} details`}
+                onClick={(e) => e.stopPropagation()}
+                initial={{ scale: 0.92, y: 24, opacity: 0 }}
+                animate={{ scale: 1, y: 0, opacity: 1 }}
+                exit={{ scale: 0.95, y: 12, opacity: 0 }}
+                transition={{ type: 'spring', damping: 26, stiffness: 320 }}
+                className="relative w-full max-w-md glass-strong rounded-2xl overflow-hidden shadow-2xl shadow-black/50"
+              >
+                {/* Top accent gradient */}
+                <div className="absolute inset-x-0 top-0 h-1 bg-gradient-to-r from-blue-500 via-blue-400 to-sky-400" />
+
+                <div className="p-6 sm:p-7">
+                  {/* Close button */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    aria-label="Close details"
+                    onClick={closeJobDetail}
+                    className="absolute right-3 top-3 h-8 w-8 rounded-full bg-white/[0.06] hover:bg-white/[0.12] text-neutral-400 hover:text-white"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+
+                  {/* Avatar + identity */}
+                  <div className="flex items-center gap-4 pr-10">
+                    <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-500 to-blue-700 flex items-center justify-center text-white font-bold text-base shadow-lg shadow-blue-500/30 shrink-0">
+                      {selectedJob.company.slice(0,2).toUpperCase()}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="inline-flex items-center gap-1.5 text-[10px] font-bold tracking-widest uppercase text-blue-400 mb-1">
+                        <Hash className="w-3 h-3" /> Job #{selectedJob.id}
+                      </div>
+                      <h3 className="text-lg font-bold text-white leading-tight truncate">{selectedJob.company}</h3>
+                      <p className="text-sm text-neutral-400 truncate">{selectedJob.role}</p>
+                    </div>
+                  </div>
+
+                  {/* Detail rows */}
+                  <div className="mt-6 space-y-3">
+                    {/* Status */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.04] border border-white/[0.06] px-4 py-3">
+                      <div className="flex items-center gap-2 text-sm text-neutral-400">
+                        <CircleDot className="w-4 h-4" /> Status
+                      </div>
+                      <div onClick={(e) => e.stopPropagation()}>
+                        <Select
+                          value={selectedJob.status}
+                          onValueChange={(v) => handleStatusChange(selectedJob.id, v, selectedJob)}
+                        >
+                          <SelectTrigger className="rounded-full glass bg-white/[0.04] border-white/[0.06] text-xs font-semibold text-white">
+                            <span className="flex items-center gap-2">
+                              <span className={`w-2 h-2 rounded-full ${meta.dot}`} />
+                              <SelectValue />
+                            </span>
+                          </SelectTrigger>
+                          <SelectContent className="rounded-xl bg-[#111] border-white/[0.08]">
+                            <SelectItem value="Applied">Applied</SelectItem>
+                            <SelectItem value="Interview">Interview</SelectItem>
+                            <SelectItem value="Offer">Offer</SelectItem>
+                            <SelectItem value="Rejected">Rejected</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    </div>
+
+                    {/* Date */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.04] border border-white/[0.06] px-4 py-3">
+                      <div className="flex items-center gap-2 text-sm text-neutral-400">
+                        <Calendar className="w-4 h-4" /> Date applied
+                      </div>
+                      <span className="text-sm font-semibold text-white">{selectedJob.date}</span>
+                    </div>
+
+                    {/* Company */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.04] border border-white/[0.06] px-4 py-3">
+                      <div className="flex items-center gap-2 text-sm text-neutral-400">
+                        <Building2 className="w-4 h-4" /> Company
+                      </div>
+                      <span className="text-sm font-semibold text-white truncate max-w-[55%]">{selectedJob.company}</span>
+                    </div>
+
+                    {/* Role */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl bg-white/[0.04] border border-white/[0.06] px-4 py-3">
+                      <div className="flex items-center gap-2 text-sm text-neutral-400">
+                        <Briefcase className="w-4 h-4" /> Role
+                      </div>
+                      <span className="text-sm font-semibold text-white truncate max-w-[55%]">{selectedJob.role}</span>
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="mt-6 flex items-center gap-3">
+                    <Button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(selectedJob.id) }}
+                      variant="ghost"
+                      className="flex-1 rounded-xl bg-white/[0.04] hover:bg-red-500/10 border border-white/[0.06] text-neutral-400 hover:text-red-400 gap-2"
+                    >
+                      <Trash2 className="w-4 h-4" /> Delete
+                    </Button>
+                    <Button
+                      onClick={closeJobDetail}
+                      className="flex-1 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 text-white font-semibold shadow-lg shadow-blue-500/25 border-0"
+                    >
+                      Close
+                    </Button>
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )
+        })()}
+      </AnimatePresence>
     </div>
   )
 }
