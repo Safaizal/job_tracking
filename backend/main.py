@@ -1,137 +1,157 @@
-from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import RedirectResponse
-from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
-from datetime import date
-import auth
+"""FastAPI app for a multi-user job tracker.
+
+Identity comes from Google Sign-In; jobs live in each person's browser, so the
+server holds no job data and no job database. The only thing stored server-side
+per user is their own Gmail token, needed to read their inbox on request.
+"""
+
 import os
+
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+
+import auth
 import gmail_service
+import session
 
-# Import our local files
-import models, schemas
-from database import engine, get_db
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
 
-# This creates the database tables if they don't exist yet
-models.Base.metadata.create_all(bind=engine)
+# Origins must be listed explicitly: the session cookie is sent with
+# credentials, and the browser rejects a wildcard for credentialed requests.
+ALLOWED_ORIGINS = [
+    origin.strip()
+    for origin in os.getenv(
+        "ALLOWED_ORIGINS", f"{FRONTEND_URL},http://127.0.0.1:5173"
+    ).split(",")
+    if origin.strip()
+]
 
-app = FastAPI()
+# Private-network and loopback origins (any port), so the app can be opened from
+# another device on the LAN without editing the list for every address.
+PRIVATE_ORIGIN_REGEX = (
+    r"^http://(localhost|127\.0\.0\.1|\[::1\]"
+    r"|10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})(:\d+)?$"
+)
+
+app = FastAPI(title="Job Tracker API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_origin_regex=PRIVATE_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 1. READ: Get all jobs
-@app.get("/api/jobs", response_model=list[schemas.JobResponse])
-def get_jobs(db: Session = Depends(get_db)):
-    # Query the database for all jobs, ordered by date descending (newest first)
-    jobs = db.query(models.Job).order_by(models.Job.date.desc()).all()
-    return jobs
 
-# 2. CREATE: Add a new job
-@app.post("/api/jobs", response_model=schemas.JobResponse)
-def create_job(job: schemas.JobCreate, db: Session = Depends(get_db)):
-    # Create a new database object
-    db_job = models.Job(**job.dict())
-    db.add(db_job)
-    db.commit()
-    db.refresh(db_job)
-    return db_job
+def current_user(request: Request) -> dict:
+    """The signed-in user, or 401. Every job and Gmail route depends on this."""
+    payload = session.read_session(request.cookies.get(session.COOKIE_NAME))
+    if not payload:
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return payload
 
-# 3. READ: Get a specific job by ID
-@app.get("/api/jobs/{job_id}", response_model=schemas.JobResponse)
-def get_job(job_id: int, db: Session = Depends(get_db)):
-    # Query the database for the job with the given ID
-    job = db.query(models.Job).filter(models.Job.id == job_id).first()
-    if job is None:
-        raise HTTPException(status_code=404, detail="Job not found")
-    return job
 
-# 4. UPDATE: Change a job's status or details
-@app.put("/api/jobs/{job_id}", response_model=schemas.JobResponse)
-def update_job(job_id: int, job_update: schemas.JobCreate, db: Session = Depends(get_db)):
-    # 1. Find the job
-    db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
-    if not db_job:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    # 2. Update the fields
-    db_job.status = job_update.status
-    db_job.company = job_update.company 
-    db_job.role = job_update.role
-    
-    db.commit()
-    db.refresh(db_job)
-    return db_job
+@app.get("/api/me")
+def whoami(user: dict = Depends(current_user)):
+    return {
+        "user": {
+            "id": user["sub"],
+            "email": user.get("email"),
+            "name": user.get("name"),
+            "picture": user.get("picture"),
+        },
+        "gmail_connected": auth.is_connected(user["sub"]),
+    }
 
-# 5. DELETE: Remove a job
-@app.delete("/api/jobs/{job_id}")
-def delete_job(job_id: int, db: Session = Depends(get_db)):
-    db_job = db.query(models.Job).filter(models.Job.id == job_id).first()
-    if not db_job:
-        raise HTTPException(status_code=404, detail="Job not found")
-        
-    db.delete(db_job)
-    db.commit()
-    return {"message": "Job deleted successfully"}
 
-# 1. Frontend calls this to get the Google Login URL
 @app.get("/auth/login")
-def login():
-    url = auth.get_login_url()
+def login(response: Response):
+    """Return the Google sign-in URL for the frontend to redirect to."""
+    try:
+        url, attempt = auth.get_login_url()
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Bound to this browser: the callback will only be accepted from here.
+    session.set_attempt_cookie(response, attempt)
     return {"url": url}
 
-# 2. Google redirects the user here after they log in
+
 @app.get("/auth/callback")
-def auth_callback(code: str):
-    # Exchange the temporary code for a long-lived token
-    auth.exchange_code_for_token(code)
-    
-    # Redirect the user back to the frontend!
-    return RedirectResponse(url="http://localhost:5173?login=success")
+def auth_callback(
+    request: Request,
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+):
+    """Google sends the user back here; trade the code for a session cookie."""
+    if error:
+        response = RedirectResponse(url=f"{FRONTEND_URL}/?login=failed")
+        session.clear_attempt_cookie(response)
+        return response
 
-@app.get("/auth/status")
-def auth_status():
-    # Just check if the token file exists
-    connected = os.path.exists("token.json")
-    return {"connected": connected}
+    try:
+        user = auth.complete_login(
+            code=code or "",
+            state=state or "",
+            attempt=request.cookies.get(session.ATTEMPT_COOKIE),
+        )
+    except auth.AuthError as exc:
+        # Send them back to a usable page rather than a raw error page.
+        response = RedirectResponse(url=f"{FRONTEND_URL}/?login=failed&reason={exc}")
+        session.clear_attempt_cookie(response)
+        return response
 
-# 6. LOGOUT: Delete the saved token so the user is actually logged out
+    response = RedirectResponse(url=f"{FRONTEND_URL}/?login=success")
+    session.clear_attempt_cookie(response)
+    session.set_session_cookie(response, session.create_session(user))
+    return response
+
+
 @app.post("/auth/logout")
-def logout():
-    # Delete the stored Google OAuth token
-    if os.path.exists("token.json"):
-        os.remove("token.json")
-    # Clean up any leftover OAuth handshake state
-    if os.path.exists(auth.STATE_FILE):
-        os.remove(auth.STATE_FILE)
-    return {"connected": False, "message": "Logged out successfully"}
+def logout(request: Request, response: Response, user: dict = Depends(current_user)):
+    """Sign out and drop this user's Gmail token. Other users are unaffected."""
+    # Revoke the session server-side too, so a copied cookie stops working here
+    # and not just in this browser.
+    session.revoke_token(request.cookies.get(session.COOKIE_NAME) or "")
+    auth.disconnect(user["sub"])
+    session.clear_session_cookie(response)
+    return {"ok": True, "message": "Signed out"}
+
+
+@app.post("/auth/disconnect-gmail")
+def disconnect_gmail(user: dict = Depends(current_user)):
+    """Keep the session, but stop reading this user's inbox."""
+    auth.disconnect(user["sub"])
+    return {"gmail_connected": False}
+
 
 @app.post("/api/sync-gmail")
-def sync_gmail(db: Session = Depends(get_db)):
-    new_jobs = gmail_service.fetch_and_parse_jobs()
-    
-    added_count = 0
-    seen = set()  # THE FIX: track what we've added during this sync
-    
-    for job_data in new_jobs:
-        key = (job_data['company'], job_data['role'])
-        if key in seen:
-            continue  # Skip duplicates within this batch
-        seen.add(key)
-        
-        exists = db.query(models.Job).filter(
-            models.Job.company == job_data['company'],
-            models.Job.role == job_data['role']
-        ).first()
-        
-        if not exists:
-            db_job = models.Job(**job_data)
-            db.add(db_job)
-            added_count += 1
-            
-    db.commit()
-    return {"message": f"Sync complete! Added {added_count} new jobs.", "added": added_count}
+def sync_gmail(user: dict = Depends(current_user)):
+    """Read this user's inbox and return parsed applications.
+
+    Nothing is persisted: the frontend merges the result into its own local
+    list, so one person's jobs can never appear in someone else's table.
+    """
+    try:
+        jobs = gmail_service.fetch_and_parse_jobs(user["sub"])
+    except auth.AuthError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    return {"jobs": jobs, "count": len(jobs)}
+
+
+@app.get("/api/health")
+@app.get("/health")
+def health():
+    """Liveness check.
+
+    Served at both paths: /health is what Vite's dev server probes, and that
+    probe should get a real answer rather than a 404.
+    """
+    return {"status": "ok"}

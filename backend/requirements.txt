@@ -1,0 +1,13 @@
+# Runtime dependencies for the Job Tracker backend.
+# Install with:  pip install -r requirements.txt
+#
+# SQLAlchemy is deliberately absent: applications live in each person's
+# browser, so there is no job database to talk to.
+
+fastapi>=0.115
+uvicorn[standard]>=0.30
+watchfiles>=0.21            # makes `uvicorn --reload` fast; ignore patterns need it
+google-api-python-client>=2.130
+google-auth-httplib2>=0.2
+google-auth-oauthlib>=1.2
+requests>=2.32

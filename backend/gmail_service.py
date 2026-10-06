@@ -1,86 +1,112 @@
-import os
-import re
-from datetime import datetime
+"""Gmail search and email parsing for one specific user.
+
+Nothing here reads a shared token file: the caller passes in the credentials
+that belong to the person who is signed in, so a sync can only ever read that
+person's inbox.
+"""
+
 from email.utils import parsedate_to_datetime
-from google.oauth2.credentials import Credentials
+
 from googleapiclient.discovery import build
+from google.oauth2.credentials import Credentials
 
-def get_gmail_service():
-    """Builds the Gmail API service using our saved token."""
-    if not os.path.exists("token.json"):
-        return None
-    
-    creds = Credentials.from_authorized_user_file("token.json", ['https://www.googleapis.com/auth/gmail.readonly'])
-    return build('gmail', 'v1', credentials=creds)
+import auth
 
-def fetch_and_parse_jobs():
-    """Searches Gmail for application emails and extracts data."""
-    service = get_gmail_service()
-    if not service:
-        return []
+# Subject patterns that usually mean an application was received.
+QUERY = (
+    'subject:"application" OR subject:"received your application" '
+    'OR subject:"thank you for applying" OR subject:"we have received"'
+)
 
-    # This is the magic Gmail search query. 
-    # We are looking for subjects that usually indicate an application was received.
-    query = 'subject:"application" OR subject:"received your application" OR subject:"thank you for applying"'
-    
-    # Fetch message IDs
-    results = service.users().messages().list(userId='me', q=query, maxResults=20).execute()
-    messages = results.get('messages', [])
-    
-    parsed_jobs = []
+MAX_RESULTS = 25
 
+# Generic lead-ins stripped from the subject to leave just the role.
+PREFIXES_TO_REMOVE = [
+    "Application received for ",
+    "Thank you for applying to ",
+    "Your application to ",
+    "We have received your application for ",
+]
+
+
+def get_gmail_service(creds: Credentials):
+    return build("gmail", "v1", credentials=creds)
+
+
+def _parse_company(sender: str) -> str:
+    # "Greenhouse <jobs@greenhouse.io>" -> "Greenhouse"
+    if "<" in sender and ">" in sender:
+        name = sender.split("<")[0].strip().strip('"')
+        if name:
+            return name
+        sender = sender.split("<", 1)[1]
+    if "@" in sender:
+        return sender.rsplit("@", 1)[-1].split(">")[0].split(".")[0].capitalize()
+    return "Unknown"
+
+
+def _parse_role(subject: str) -> str:
+    role = subject.strip()
+    for prefix in PREFIXES_TO_REMOVE:
+        if role.lower().startswith(prefix.lower()):
+            return role[len(prefix):].strip()
+    return role or "Unknown Role"
+
+
+def _parse_date(date_str: str) -> str:
+    try:
+        return parsedate_to_datetime(date_str).strftime("%Y-%m-%d")
+    except Exception:
+        return date_str
+
+
+def fetch_and_parse_jobs(user_id: str) -> list[dict]:
+    """Search this user's Gmail and extract one entry per application email.
+
+    Raises auth.AuthError when the user has not connected Gmail, or when their
+    grant has expired and needs reconnecting.
+    """
+    creds = auth.load_credentials(user_id)
+    if not creds:
+        raise auth.AuthError("Connect your Gmail account first to sync.")
+
+    service = get_gmail_service(creds)
+
+    results = (
+        service.users()
+        .messages()
+        .list(userId="me", q=QUERY, maxResults=MAX_RESULTS)
+        .execute()
+    )
+    messages = results.get("messages", [])
     if not messages:
         return []
 
-    # Fetch full details for each message
-    for msg_summary in messages:
-        msg = service.users().messages().get(
-            userId='me', 
-            id=msg_summary['id'], 
-            format='metadata',
-            metadataHeaders=['From', 'Subject', 'Date']
-        ).execute()
+    parsed_jobs = []
+    for summary in messages:
+        msg = (
+            service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=summary["id"],
+                format="metadata",
+                metadataHeaders=["From", "Subject", "Date"],
+            )
+            .execute()
+        )
 
-        headers = {h['name']: h['value'] for h in msg['payload']['headers']}
-        
-        subject = headers.get('Subject', 'Unknown Role')
-        sender = headers.get('From', 'Unknown Company')
-        date_str = headers.get('Date', '')
+        headers = {h["name"]: h["value"] for h in msg["payload"]["headers"]}
+        subject = headers.get("Subject", "Unknown Role")
+        sender = headers.get("From", "Unknown Company")
 
-        # --- Basic Parsing Logic ---
-        # 1. Extract Company: Usually the email domain or the name before the <email>
-        company = "Unknown"
-        if '<' in sender and '>' in sender:
-            # e.g., "Greenhouse <jobs@greenhouse.io>" -> "Greenhouse"
-            company = sender.split('<')[0].strip()
-            if not company:
-                # fallback to domain if name is empty
-                domain = sender.split('@')[-1].replace('>', '')
-                company = domain.split('.')[0].capitalize()
-        else:
-            company = sender.split('@')[-1].split('.')[0].capitalize()
-
-        # 2. Clean up Role: Remove generic prefixes
-        role = subject
-        prefixes_to_remove = ["Application received for ", "Thank you for applying to ", "Your application to "]
-        for prefix in prefixes_to_remove:
-            if role.lower().startswith(prefix.lower()):
-                role = role[len(prefix):]
-                break
-
-        # 3. Format Date: Convert Gmail's RFC2822 date to YYYY-MM-DD
-        formatted_date = ""
-        try:
-            dt = parsedate_to_datetime(date_str)
-            formatted_date = dt.strftime('%Y-%m-%d')
-        except Exception:
-            formatted_date = date_str # Fallback to raw string if parsing fails
-
-        parsed_jobs.append({
-            "company": company,
-            "role": role,
-            "date": formatted_date,
-            "status": "Applied"
-        })
+        parsed_jobs.append(
+            {
+                "company": _parse_company(sender),
+                "role": _parse_role(subject),
+                "date": _parse_date(headers.get("Date", "")),
+                "status": "Applied",
+            }
+        )
 
     return parsed_jobs

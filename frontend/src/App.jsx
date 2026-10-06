@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
@@ -9,15 +9,37 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import {
-  Trash2, Search, Loader2, Briefcase, Sparkles, TrendingUp,
+  Trash2, Search, Loader2, Briefcase, Sparkles,
   Building2, Mail, Zap, Filter, Calendar, ArrowUpRight,
   CircleDot, CheckCircle2, XCircle, Clock3, Layers,
-  LogOut, Menu, X, Hash, ExternalLink
+  LogOut, Menu, X, Hash, ExternalLink, Unlink, User
 } from "lucide-react"
+import {
+  fetchMe, startGoogleLogin, logout as apiLogout, disconnectGmail, syncGmail,
+} from '@/lib/api'
+import {
+  loadJobs, addJob, updateJob, deleteJob, mergeSyncedJobs,
+} from '@/lib/jobsStore'
+import LoginScreen from '@/components/LoginScreen'
 
 function App() {
+  // Who is signed in, resolved once at startup from the session cookie.
+  const [user, setUser] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  // Read the sign-in result the backend put in the URL, on the first render only.
+  const [authError, setAuthError] = useState(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('login') !== 'failed') return ''
+    return params.get('reason') || 'Sign-in did not finish. Please try again.'
+  })
+  const [signingIn, setSigningIn] = useState(false)
+
+  // Jobs live in this browser only, one list per signed-in account.
   const [jobs, setJobs] = useState([])
   const [loading, setLoading] = useState(true)
+  const jobsRef = useRef(jobs)
+  useEffect(() => { jobsRef.current = jobs }, [jobs])
+
   const [isGmailConnected, setIsGmailConnected] = useState(false)
   const [isSyncing, setIsSyncing] = useState(false)
   const [searchTerm, setSearchTerm] = useState('')
@@ -25,6 +47,7 @@ function App() {
   const [company, setCompany] = useState('')
   const [role, setRole] = useState('')
   const [mobileMenu, setMobileMenu] = useState(false)
+  const [notice, setNotice] = useState(null) // { tone: 'ok' | 'error', text }
 
   // Selected job for the detail popup
   const [selectedJob, setSelectedJob] = useState(null)
@@ -41,75 +64,124 @@ function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  const fetchJobs = () => {
-    fetch('http://localhost:8000/api/jobs')
-      .then(r => r.json())
-      .then(data => { setJobs(data); setLoading(false) })
-      .catch(() => setLoading(false))
+  // Clear a notice after a few seconds
+  useEffect(() => {
+    if (!notice) return
+    const timer = setTimeout(() => setNotice(null), 5000)
+    return () => clearTimeout(timer)
+  }, [notice])
+
+  // Resolve the session on load, and drop the sign-in result from the URL
+  useEffect(() => {
+    // Tidy the URL so a refresh does not resurface a stale message.
+    if (new URLSearchParams(window.location.search).has('login')) {
+      window.history.replaceState({}, '', window.location.pathname)
+    }
+
+    let cancelled = false
+    fetchMe()
+      .then((data) => {
+        if (cancelled) return
+        if (data) {
+          setUser(data.user)
+          setIsGmailConnected(data.gmail_connected)
+          setJobs(loadJobs(data.user.id))
+        }
+      })
+      .catch((err) => { if (!cancelled) setAuthError(err.message) })
+      .finally(() => { if (!cancelled) { setAuthLoading(false); setLoading(false) } })
+
+    return () => { cancelled = true }
+  }, [])
+
+  // The session expired or was revoked elsewhere: drop back to the sign-in screen
+  const handleSignedOut = () => {
+    setUser(null)
+    setIsGmailConnected(false)
+    setJobs([])
+    setSelectedJob(null)
+    setNotice(null)
   }
 
-  useEffect(() => {
-    fetchJobs()
-    fetch('http://localhost:8000/auth/status')
-      .then(res => res.json())
-      .then(data => setIsGmailConnected(data.connected))
-      .catch(() => {})
-  }, [])
+  const handleSignIn = async () => {
+    setSigningIn(true)
+    setAuthError('')
+    try {
+      await startGoogleLogin()
+    } catch (err) {
+      setAuthError(err.message)
+      setSigningIn(false)
+    }
+  }
 
   const handleSubmit = (e) => {
     e.preventDefault()
-    const today = new Date().toISOString().split('T')[0]
-    fetch('http://localhost:8000/api/jobs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ company, role, date: today, status: 'Applied' }),
-    }).then(() => { setCompany(''); setRole(''); fetchJobs() })
+    // Computed synchronously so the duplicate check sees this submission's result.
+    const next = addJob(user.id, jobs, { company, role, status: 'Applied' })
+    if (next.length === jobs.length) {
+      setNotice({ tone: 'error', text: 'That application is already on your list.' })
+    } else {
+      setNotice(null)
+      setJobs(next)
+    }
+    setCompany('')
+    setRole('')
   }
 
-  const handleStatusChange = (jobId, newStatus, jobData) => {
-    fetch(`http://localhost:8000/api/jobs/${jobId}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...jobData, status: newStatus }),
-    }).then(() => {
-      // Reflect the change in the open detail popup too
-      setSelectedJob(prev => prev && prev.id === jobId ? { ...prev, status: newStatus } : prev)
-      fetchJobs()
-    })
+  const handleStatusChange = (jobId, newStatus) => {
+    setJobs(prev => updateJob(user.id, prev, jobId, { status: newStatus }))
+    // Reflect the change in the open detail popup too
+    setSelectedJob(prev => prev && prev.id === jobId ? { ...prev, status: newStatus } : prev)
   }
 
   const handleDelete = (jobId) => {
     if (!window.confirm("Delete this application?")) return
-    fetch(`http://localhost:8000/api/jobs/${jobId}`, { method: 'DELETE' }).then(() => {
-      setSelectedJob(prev => prev && prev.id === jobId ? null : prev)
-      fetchJobs()
-    })
+    setJobs(prev => deleteJob(user.id, prev, jobId))
+    setSelectedJob(prev => prev && prev.id === jobId ? null : prev)
   }
 
   const handleJobClick = (job) => setSelectedJob(job)
   const closeJobDetail = () => setSelectedJob(null)
 
-  const handleGmailLogin = () => {
-    fetch('http://localhost:8000/auth/login')
-      .then(res => res.json())
-      .then(data => { window.location.href = data.url })
-  }
-
-  const handleSyncGmail = () => {
+  const handleSyncGmail = async () => {
     setIsSyncing(true)
-    fetch('http://localhost:8000/api/sync-gmail', { method: 'POST' })
-      .then(res => res.json())
-      .then(data => { alert(data.message); fetchJobs(); setIsSyncing(false) })
-      .catch(() => setIsSyncing(false))
+    setNotice(null)
+    try {
+      const incoming = await syncGmail()
+      const { jobs: next, added } = mergeSyncedJobs(user.id, jobsRef.current, incoming)
+      setJobs(next)
+      setNotice({
+        tone: 'ok',
+        text: added
+          ? `Sync complete! Added ${added} new ${added === 1 ? 'application' : 'applications'}.`
+          : 'Sync complete — everything found was already on your list.',
+      })
+    } catch (err) {
+      if (err.status === 401) return handleSignedOut()
+      setNotice({ tone: 'error', text: err.message })
+    } finally {
+      setIsSyncing(false)
+    }
   }
 
-  const handleLogout = () => {
-    fetch('http://localhost:8000/auth/logout', { method: 'POST' })
-      .then(res => {
-        setIsGmailConnected(false)
-        if (res.ok) window.location.href = '/'
-      })
-      .catch(() => setIsGmailConnected(false))
+  const handleDisconnectGmail = async () => {
+    try {
+      await disconnectGmail()
+      setIsGmailConnected(false)
+      setNotice({ tone: 'ok', text: 'Gmail disconnected. Your applications are untouched.' })
+    } catch (err) {
+      if (err.status === 401) return handleSignedOut()
+      setNotice({ tone: 'error', text: err.message })
+    }
+  }
+
+  const handleLogout = async () => {
+    try {
+      await apiLogout()
+    } catch {
+      // Sign out locally regardless, so the UI never stays stuck.
+    }
+    handleSignedOut()
   }
 
   const filteredJobs = useMemo(() => {
@@ -139,6 +211,28 @@ function App() {
   }
 
   const filterPills = ['All', 'Applied', 'Interview', 'Offer', 'Rejected']
+
+  // While we work out whether anyone is signed in, show a neutral splash rather
+  // than flashing the dashboard at a signed-out visitor.
+  if (authLoading) {
+    return (
+      <div className="min-h-screen mesh-bg flex items-center justify-center">
+        <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+      </div>
+    )
+  }
+
+  // Nobody signed in: the only way in is Google, and each account gets its own
+  // private list of applications.
+  if (!user) {
+    return (
+      <LoginScreen
+        onSignIn={handleSignIn}
+        pending={signingIn}
+        error={authError}
+      />
+    )
+  }
 
   return (
     <div className="min-h-screen mesh-bg relative">
@@ -182,7 +276,7 @@ function App() {
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {/* Desktop actions */}
             <div className="hidden sm:flex items-center gap-2">
-              {isGmailConnected ? (
+              {isGmailConnected && (
                 <>
                   <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} className="hidden lg:flex items-center gap-2 glass px-3 py-1.5 rounded-full text-xs font-semibold">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse shadow shadow-emerald-500/50" />
@@ -194,15 +288,33 @@ function App() {
                     <span className="hidden lg:inline">{isSyncing ? 'Syncing…' : 'Sync Gmail'}</span>
                     <span className="lg:hidden">Sync</span>
                   </Button>
-                  <Button onClick={handleLogout} variant="ghost" size="sm"
-                    className="rounded-full glass bg-white/[0.06] hover:bg-red-500/10 border-white/[0.08] text-neutral-300 hover:text-red-400 gap-1.5">
-                    <LogOut className="h-4 w-4" /> <span className="hidden lg:inline">Logout</span>
-                  </Button>
                 </>
-              ) : (
-                <Button onClick={handleGmailLogin} variant="outline"
-                  className="rounded-full glass bg-white/[0.06] hover:bg-white/[0.1] border-white/[0.08] text-neutral-300 hover:text-white gap-2">
-                  <Mail className="h-4 w-4" /> <span className="hidden lg:inline">Connect Gmail</span><span className="lg:hidden">Connect</span>
+              )}
+
+              {/* Who is signed in */}
+              <div
+                title={user.email}
+                className="hidden lg:flex items-center gap-2 glass px-3 py-1.5 rounded-full text-xs font-semibold max-w-[190px]"
+              >
+                {user.picture ? (
+                  <img src={user.picture} alt="" referrerPolicy="no-referrer"
+                    className="w-4 h-4 rounded-full shrink-0" />
+                ) : (
+                  <User className="w-4 h-4 text-blue-400 shrink-0" />
+                )}
+                <span className="truncate text-neutral-300">{user.name || user.email}</span>
+              </div>
+
+              <Button onClick={handleLogout} variant="ghost" size="sm"
+                className="rounded-full glass bg-white/[0.06] hover:bg-red-500/10 border-white/[0.08] text-neutral-300 hover:text-red-400 gap-1.5">
+                <LogOut className="h-4 w-4" /> <span className="hidden lg:inline">Sign out</span>
+              </Button>
+
+              {isGmailConnected && (
+                <Button onClick={handleDisconnectGmail} variant="ghost" size="sm"
+                  title="Stop reading your Gmail. Your applications are kept."
+                  className="rounded-full glass bg-white/[0.06] hover:bg-amber-500/10 border-white/[0.08] text-neutral-500 hover:text-amber-400">
+                  <Unlink className="h-4 w-4" />
                 </Button>
               )}
             </div>
@@ -224,6 +336,16 @@ function App() {
               className="sm:hidden border-t border-white/[0.06] overflow-hidden bg-black/30 backdrop-blur-xl"
             >
               <div className="px-4 py-3 flex flex-col gap-2">
+                <div className="flex items-center gap-2 text-xs font-semibold glass px-3 py-2 rounded-full w-fit max-w-full">
+                  {user.picture ? (
+                    <img src={user.picture} alt="" referrerPolicy="no-referrer"
+                      className="w-4 h-4 rounded-full shrink-0" />
+                  ) : (
+                    <User className="w-4 h-4 text-blue-400 shrink-0" />
+                  )}
+                  <span className="truncate">{user.name || user.email}</span>
+                </div>
+
                 {isGmailConnected ? (
                   <>
                     <div className="flex items-center gap-2 text-xs font-semibold glass px-3 py-2 rounded-full w-fit">
@@ -232,23 +354,57 @@ function App() {
                     <Button onClick={() => { handleSyncGmail(); setMobileMenu(false) }} disabled={isSyncing} className="rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 text-white border-0 w-full">
                       {isSyncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Mail className="h-4 w-4" />} {isSyncing ? 'Syncing…' : 'Sync Gmail'}
                     </Button>
-                    <Button onClick={handleLogout} variant="ghost" size="sm"
-                      className="rounded-xl glass bg-white/[0.06] hover:bg-red-500/10 border-white/[0.08] text-neutral-300 hover:text-red-400 gap-2 w-full">
-                      <LogOut className="h-4 w-4" /> Logout
+                    <Button onClick={() => { handleDisconnectGmail(); setMobileMenu(false) }} variant="ghost" size="sm"
+                      className="rounded-xl glass bg-white/[0.06] hover:bg-amber-500/10 border-white/[0.08] text-neutral-400 hover:text-amber-400 gap-2 w-full">
+                      <Unlink className="h-4 w-4" /> Disconnect Gmail
                     </Button>
                   </>
                 ) : (
-                  <Button onClick={handleGmailLogin} variant="outline" className="rounded-xl glass w-full">
-                    <Mail className="h-4 w-4" /> Connect Gmail
-                  </Button>
+                  <div className="text-xs text-neutral-500 glass px-3 py-2 rounded-xl leading-relaxed">
+                    Connect Gmail to pull application emails into your list.
+                  </div>
                 )}
+
+                <Button onClick={handleLogout} variant="ghost" size="sm"
+                  className="rounded-xl glass bg-white/[0.06] hover:bg-red-500/10 border-white/[0.08] text-neutral-300 hover:text-red-400 gap-2 w-full">
+                  <LogOut className="h-4 w-4" /> Sign out
+                </Button>
               </div>
             </motion.div>
           )}
         </AnimatePresence>
       </motion.header>
 
-      <main className="relative max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-8 space-y-5 sm:space-y-6">
+      <main className="relative max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:space-y-6 sm:py-8 space-y-5">
+        {/* ── Sync / error notices ── */}
+        <AnimatePresence>
+          {notice && (
+            <motion.div
+              initial={{ opacity: 0, y: -8, height: 0 }}
+              animate={{ opacity: 1, y: 0, height: 'auto' }}
+              exit={{ opacity: 0, y: -8, height: 0 }}
+              role="status"
+              className={`glass-strong rounded-2xl px-4 py-3 text-sm flex items-center gap-2.5 overflow-hidden ${
+                notice.tone === 'error'
+                  ? 'border border-red-500/25 text-red-300'
+                  : 'border border-emerald-500/25 text-emerald-300'
+              }`}
+            >
+              {notice.tone === 'error'
+                ? <XCircle className="w-4 h-4 shrink-0" />
+                : <CheckCircle2 className="w-4 h-4 shrink-0" />}
+              <span>{notice.text}</span>
+              <button
+                onClick={() => setNotice(null)}
+                className="ml-auto text-current/60 hover:text-current shrink-0"
+                aria-label="Dismiss"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* ── Hero + Stats ── */}
         <div className="grid grid-cols-12 gap-3 sm:gap-4">
           <motion.div
@@ -274,15 +430,24 @@ function App() {
               </p>
               <div className="flex items-center gap-4 mt-5">
                 <div className="flex -space-x-2">
-                  {[1,2,3].map(i => (
-                    <div key={i} className="w-9 h-9 rounded-full border-2 border-neutral-800 glass flex items-center justify-center text-[11px] font-bold text-blue-400">
-                      {['JD','AK','SR'][i-1]}
+                  {user.picture ? (
+                    <img
+                      src={user.picture}
+                      alt=""
+                      referrerPolicy="no-referrer"
+                      className="w-9 h-9 rounded-full border-2 border-neutral-800 object-cover"
+                    />
+                  ) : (
+                    <div className="w-9 h-9 rounded-full border-2 border-neutral-800 glass flex items-center justify-center text-[11px] font-bold text-blue-400">
+                      {(user.name || user.email || '?').slice(0, 2).toUpperCase()}
                     </div>
-                  ))}
+                  )}
                 </div>
-                <div className="text-sm">
-                  <div className="font-bold text-white flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5 text-emerald-400" /> {stats.total} total applications</div>
-                  <div className="text-neutral-500 mt-0.5">{stats.interview} interviews • {stats.offer} offers</div>
+                <div className="text-sm min-w-0">
+                  <div className="font-bold text-white truncate">{user.name || user.email}</div>
+                  <div className="text-neutral-500 mt-0.5">
+                    {stats.total} application{stats.total === 1 ? '' : 's'} • {stats.interview} interview{stats.interview === 1 ? '' : 's'} • {stats.offer} offer{stats.offer === 1 ? '' : 's'}
+                  </div>
                 </div>
               </div>
             </div>
@@ -572,7 +737,7 @@ function App() {
         )}
 
         <p className="text-center text-xs text-neutral-600 pt-2 px-4">
-          Crafted with glass, motion & obsession for detail • GSAP Style • v2.2
+          Crafted with glass, motion & obsession for detail • Stored privately in this browser
         </p>
       </main>
 

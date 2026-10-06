@@ -9,12 +9,19 @@ backend/__pycache__/
 backend/*.pyc
 backend/*.pyo
 
-# SECRETS & DATABASE (CRITICAL: DO NOT PUSH THESE)
+# SECRETS (CRITICAL: DO NOT PUSH THESE)
+# Signs every session cookie
+backend/.session_secret
 backend/credentials.json
+backend/.env
+
+# Per-user Google tokens (one file per signed-in account, inbox access)
+backend/tokens/
+
+# Leftovers from the old single-user, database-backed version
 backend/token.json
 backend/jobs.db
 backend/oauth_state.json
-backend/.env
 
 # --- FRONTEND (Node/React) ---
 # Dependencies (Never push these!)
